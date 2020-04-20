@@ -1,0 +1,72 @@
+RRPN：带有rotaion预测的RPN（如何结合角度与feature map？ rotated proposal）
+答：得到的proposal是倾斜的box，然后对倾斜的box取正常的box，然后取一些sample点，然后对sample点做旋转，然后对sample点做分组，组内的sample点取最大值代表该组，然后各组得到的feature map就是rotated RPN
+
+ground truth:
+	tuple(x, y, h, w, theta) 
+		x和y是bounding box的中心点
+		h是short side，w是long side
+		theta是从x轴+出发到long side的夹角，范围是[-pie/4, 3pie/4)
+			这样表示theta的好处是不用4个点8个值的方式这么多数值，而且对原图做旋转之后的数值也容易计算
+	
+Rotaion Anchors:
+	除了有scale和ratio外，加入orientation（6种，-pie/6, 0, pie/6, pie/3, pie/2 and 2pie/3)
+	ratio(1:2, 1:5 and 1:8)
+	scale(8, 16 and 32)
+	feature map的每个位置有6*3*3个anchor
+	reg layer输出5*54，cls layer输出2*54
+
+positive R-anchors:
+	1、最大IoU
+	2、IoU > 0.7
+	3、夹角 < pie/12 （（1 or 2）且3）
+negative R-anchors:
+	1、IoU < 0.3
+	2、IoU > 0.7 且 角度 > pie/12
+不在positive或negative中的training时不会被使用
+
+Loss function:
+	L(p, l, v*, v) = L_cls(p, l) + lambda * L_reg(v*, v)
+		p是（p0, p1）l=0是背景概率，l=1是文字概率		
+		L_cls = -log(p_l)
+		L_reg是smooth_L1 loss
+		smooth_L1 loss = 0.5*x^2, if |x| < 1
+				 |x|-0.5, otherwise （为了让loss在x=1处连续）
+	为了让loss是scale-invariant，v和v*的转换方法：
+		# margin wrt. anchor
+		v_x = (x - x_a) / w_a
+		v_y = (y - y_a) / h_a
+
+		v_x* = (x* - x_a) / w_a
+		v_y* = (y* - y_a) / h_a
+
+		v_h = log(h/h_a)
+		v_w = log(w/w_a)
+
+		v_h* = log(h*/h_a)
+		v_w* = log(w*/w_a)
+
+Skew NMS:
+	1、存在IoU > 0.7，则取IoU最大的
+	2、所有IoU在[0.3, 0.7]，取角度差小于pie/12的最小的
+
+RRoi Pooling:
+	rotated proposal region划分成Hr x Wr个subregion，原始是h x w，每个subregion的Grid_h, Grid_w是h/Hr x w/Wr
+	每个subregion都与proposal的方向一致
+	for (i, j) in {0, ..., Hr-1} x {0, ..., Wr-1}:
+		L, T = x - w/2 + j*Grid_w, y - h/2 + i*Grid_h（定位当前grid的最左与最上坐标）
+		L_rotate = (L-x)*cos_theta + (T-y)*sin_theta（对L旋转theta度）
+		T_rotate = (T-y)*cos_theta + (L-x)*sin_theta（对T选择theta度）
+		value = 0 （初始化最大值）
+		for (k, l) in {0, ..., int(Grid_h*SS-1)} x {0, ..., int(Grid_w*ss-1)}}: （在grid内sample点的个数）
+			Px = L_rotate*SS + l*cos_theta + k*sin_theta + 1/2
+			Py = T_rotate*SS + l*sin_theta + k*cos_theta + 1/2
+			if InFeatMap(Py, Px) > value:
+				value = InFeatMap(Py, Px)
+		OutFeatMap(i, j) = value
+
+Experiments:
+	proposal的个数会是Faster-RCNN的6倍
+	1e-3的lr训练200k个iteration，然后1e-4的lr训练100k个iteration，weight decay是5e-4,momentum是0.9，用随机旋转作为数据增强
+
+
+
